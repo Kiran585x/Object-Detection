@@ -1,0 +1,279 @@
+#include "esp_camera.h"
+#include <WiFi.h>
+#include <WebServer.h>
+
+#define PWDN_GPIO_NUM     -1
+#define RESET_GPIO_NUM    2
+#define XCLK_GPIO_NUM     44
+#define SIOD_GPIO_NUM     8
+#define SIOC_GPIO_NUM     9
+#define Y9_GPIO_NUM       6
+#define Y8_GPIO_NUM       41
+#define Y7_GPIO_NUM       5
+#define Y6_GPIO_NUM       42
+#define Y5_GPIO_NUM       4
+#define Y4_GPIO_NUM       10
+#define Y3_GPIO_NUM       3
+#define Y2_GPIO_NUM       7
+#define VSYNC_GPIO_NUM    21
+#define HREF_GPIO_NUM     1
+#define PCLK_GPIO_NUM     39
+
+const char* ssid = "JioFibers-4G";     // Replace with your WiFi SSID
+const char* password = "1234567890"; // Replace with your WiFi password
+
+WebServer server(80);
+framesize_t frameSize = FRAMESIZE_VGA; // Higher resolution for better detection
+pixformat_t pixelFormat = PIXFORMAT_JPEG;
+
+void initCamera() {
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = pixelFormat;
+  config.frame_size = frameSize;
+  config.jpeg_quality = 10; // Lower number = higher quality
+  config.fb_count = 1;
+
+  esp_camera_deinit();
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed: 0x%x\n", err);
+  } else {
+    Serial.println("Camera Initialized");
+  }
+}
+
+void handle_jpg_stream() {
+  WiFiClient client = server.client();
+  if (!client.connected()) return;
+
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: multipart/x-mixed-replace; boundary=frame");
+  client.println();
+
+  while (client.connected()) {
+    camera_fb_t * fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial.println("Camera capture failed");
+      break;
+    }
+
+    client.printf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
+    client.write(fb->buf, fb->len);
+    client.println();
+
+    esp_camera_fb_return(fb);
+    delay(100); // Adjust for frame rate
+  }
+}
+
+void handleRootPage() {
+  server.send(200, "text/html", R"rawliteral(
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>IndusBoard Object Detection</title>
+        <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.1.0"></script>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 20px;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                background: #f2f2f2;
+            }
+            .container {
+                background: white;
+                padding: 20px;
+                border-radius: 15px;
+                box-shadow: 0 0 20px rgba(0,0,0,0.2);
+            }
+            #videoContainer {
+                position: relative;
+                margin: 20px 0;
+            }
+            #stream {
+                width: 640px;
+                height: 480px;
+            }
+            #canvas {
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 640px;
+                height: 480px;
+            }
+            #controls {
+                margin: 20px 0;
+            }
+            #results {
+                color: #ff0000;
+                margin-top: 20px;
+                text-align: left;
+                max-width: 640px;
+            }
+            select, button {
+                padding: 8px;
+                margin: 0 5px;
+                border-radius: 5px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>IndusBoard Object Detection</h1>
+            <div id="videoContainer">
+                <img id="stream" src="/stream">
+                <canvas id="canvas"></canvas>
+            </div>
+            <div id="controls">
+                <select id="object">
+                    <option value="person">Person</option>
+                    <option value="car">Car</option>
+                    <option value="dog">Dog</option>
+                    <option value="cat">Cat</option>
+                    <option value="remote">Cat</option>
+                </select>
+                <select id="score">
+                    <option value="0.5">0.5</option>
+                    <option value="0.6">0.6</option>
+                    <option value="0.7">0.7</option>
+                    <option value="0.8">0.8</option>
+                </select>
+                <button id="startBtn">Start Detection</button>
+                <button id="stopBtn">Stop Detection</button>
+            </div>
+            <div id="results"></div>
+        </div>
+        <script>
+            const stream = document.getElementById('stream');
+            const canvas = document.getElementById('canvas');
+            const context = canvas.getContext('2d');
+            const objectSelect = document.getElementById('object');
+            const scoreSelect = document.getElementById('score');
+            const startBtn = document.getElementById('startBtn');
+            const stopBtn = document.getElementById('stopBtn');
+            const results = document.getElementById('results');
+
+            let model;
+            let detecting = false;
+
+            canvas.width = 640;
+            canvas.height = 480;
+
+            async function loadModel() {
+                results.innerHTML = 'Loading model...';
+                model = await cocoSsd.load();
+                results.innerHTML = 'Model loaded successfully!';
+            }
+
+            function detectObjects() {
+                if (!detecting || !model) return;
+
+                context.drawImage(stream, 0, 0, canvas.width, canvas.height);
+                model.detect(canvas).then(predictions => {
+                    context.clearRect(0, 0, canvas.width, canvas.height);
+                    context.drawImage(stream, 0, 0, canvas.width, canvas.height);
+
+                    let objectCount = 0;
+                    let resultText = '';
+
+                    predictions.forEach(prediction => {
+                        if (prediction.score >= parseFloat(scoreSelect.value)) {
+                            const [x, y, width, height] = prediction.bbox;
+                            context.beginPath();
+                            context.rect(x, y, width, height);
+                            context.lineWidth = 2;
+                            context.strokeStyle = '#00FFFF';
+                            context.fillStyle = 'red';
+                            context.stroke();
+                            context.font = '16px Arial';
+                            context.fillText(
+                                `${prediction.class} (${Math.round(prediction.score * 100)}%)`,
+                                x,
+                                y > 10 ? y - 5 : y + 15
+                            );
+
+                            resultText += `${prediction.class}: ${Math.round(prediction.score * 100)}%<br>`;
+                            if (prediction.class === objectSelect.value) objectCount++;
+                        }
+                    });
+
+                    results.innerHTML = resultText || 'No objects detected';
+                    results.innerHTML += `<br>${objectSelect.value} count: ${objectCount}`;
+
+                    if (detecting) requestAnimationFrame(detectObjects);
+                });
+            }
+
+            startBtn.addEventListener('click', () => {
+                if (!model) {
+                    results.innerHTML = 'Please wait for model to load';
+                    return;
+                }
+                detecting = true;
+                detectObjects();
+            });
+
+            stopBtn.addEventListener('click', () => {
+                detecting = false;
+                context.clearRect(0, 0, canvas.width, canvas.height);
+                results.innerHTML = 'Detection stopped';
+            });
+
+            stream.onload = () => {
+                if (detecting) detectObjects();
+            };
+
+            loadModel();
+        </script>
+    </body>
+    </html>
+  )rawliteral");
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.setDebugOutput(true);
+  Serial.println("\n[Starting Camera Stream]");
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  initCamera();
+  server.on("/", HTTP_GET, handleRootPage);
+  server.on("/stream", HTTP_GET, handle_jpg_stream);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
