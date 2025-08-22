@@ -1,4 +1,4 @@
-# ESP32-CAM Object Detection
+# Indusboard Object Detection
 
 This project uses an ESP32-CAM module to capture video frames and host them via a web server.
 Future improvements include adding basic object/motion detection.
@@ -10,7 +10,7 @@ Future improvements include adding basic object/motion detection.
 
 ## Hardware Required
 - ESP32-CAM
-- FTDI programmer / ESP32 dev board
+- Indusboard v2
 
 ## Setup
 1. Flash `Arduino Code` to ESP32-CAM.
